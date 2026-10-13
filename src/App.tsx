@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
+import Player from '@vimeo/player';
 import {
   Volume2,
   ChevronDown,
@@ -140,8 +141,8 @@ export default function App() {
   // Video references and audio state
   const videoSectionRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const vimeoPlayerRef = useRef<Player | null>(null);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(false);
-  const hasUnmutedOnce = useRef<boolean>(false);
 
   // Sync route on popstate and hashchange
   useEffect(() => {
@@ -197,11 +198,53 @@ export default function App() {
     };
   }, [config.ad1ScriptUrl]);
 
-  // Reliable Auto Sound Trigger (unmutes without restarting playback to prevent double sound)
-  const triggerAutoSound = () => {
-    if (hasUnmutedOnce.current) return;
-    hasUnmutedOnce.current = true;
+  // Connect Official Vimeo Player SDK
+  useEffect(() => {
+    if (isAdminPath || !iframeRef.current) return;
 
+    try {
+      const player = new Player(iframeRef.current);
+      vimeoPlayerRef.current = player;
+
+      player.ready().then(() => {
+        // Force unmuting via SDK
+        player.setMuted(false).then(() => {
+          player.setVolume(1);
+          setSoundEnabled(true);
+        }).catch(() => {
+          // If browser policy holds, it will unmute on first gesture
+        });
+      });
+
+      player.on('play', () => {
+        player.setMuted(false).catch(() => {});
+        player.setVolume(1).catch(() => {});
+      });
+
+      return () => {
+        player.destroy().catch(() => {});
+        vimeoPlayerRef.current = null;
+      };
+    } catch (err) {
+      console.error('Vimeo player SDK init error:', err);
+    }
+  }, [config.videoId, isAdminPath]);
+
+  // Robust Auto Sound Trigger using Vimeo Player SDK
+  const triggerAutoSound = () => {
+    if (vimeoPlayerRef.current) {
+      vimeoPlayerRef.current
+        .setMuted(false)
+        .then(() => {
+          vimeoPlayerRef.current?.setVolume(1);
+          setSoundEnabled(true);
+        })
+        .catch((err) => {
+          console.warn('Vimeo unmute attempt:', err);
+        });
+    }
+
+    // Fallback postMessage
     if (iframeRef.current && iframeRef.current.contentWindow) {
       try {
         iframeRef.current.contentWindow.postMessage('{"method":"setMuted","value":false}', '*');
@@ -213,7 +256,54 @@ export default function App() {
     setSoundEnabled(true);
   };
 
-  // Smooth scroll directly to the video section
+  // Gentle, slow auto-scrolling function to let user view top ads as it scrolls
+  const slowScrollToVideo = (duration = 4500) => {
+    if (!videoSectionRef.current) return;
+
+    const startY = window.pageYOffset;
+    const targetRect = videoSectionRef.current.getBoundingClientRect();
+    const targetY = startY + targetRect.top - Math.max(20, (window.innerHeight - targetRect.height) / 2);
+    const distance = targetY - startY;
+
+    if (Math.abs(distance) < 20) return;
+
+    const startTime = performance.now();
+    let isCancelled = false;
+
+    const cancelScroll = () => {
+      isCancelled = true;
+      window.removeEventListener('wheel', cancelScroll);
+      window.removeEventListener('touchstart', cancelScroll);
+    };
+
+    window.addEventListener('wheel', cancelScroll, { passive: true });
+    window.addEventListener('touchstart', cancelScroll, { passive: true });
+
+    // Smooth easeInOut curve for leisurely, natural reading speed
+    const easeInOutCubic = (t: number) => {
+      return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
+    };
+
+    const step = (currentTime: number) => {
+      if (isCancelled) return;
+      const elapsed = currentTime - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const ease = easeInOutCubic(progress);
+
+      window.scrollTo(0, startY + distance * ease);
+
+      if (progress < 1) {
+        requestAnimationFrame(step);
+      } else {
+        cancelScroll();
+        triggerAutoSound();
+      }
+    };
+
+    requestAnimationFrame(step);
+  };
+
+  // Immediate smooth scroll for button click
   const scrollToVideo = (behavior: ScrollBehavior = 'smooth') => {
     if (videoSectionRef.current) {
       videoSectionRef.current.scrollIntoView({
@@ -224,32 +314,20 @@ export default function App() {
     triggerAutoSound();
   };
 
-  // Perform multi-stage reliable auto-scroll on entrance so video is centered right in front of user
+  // Start slow gentle scroll after 1.2 seconds so user sees top ads comfortably
   useEffect(() => {
     if (isAdminPath || !config.autoScroll) return;
 
-    // Fast initial scroll
-    const timer1 = setTimeout(() => {
-      scrollToVideo('smooth');
-    }, 300);
-
-    // Follow-up scroll once ad banners initialize height
-    const timer2 = setTimeout(() => {
-      scrollToVideo('smooth');
-    }, 900);
-
-    const timer3 = setTimeout(() => {
-      scrollToVideo('smooth');
-    }, 1800);
+    const scrollTimer = setTimeout(() => {
+      slowScrollToVideo(5000); // 5 seconds leisurely glide down
+    }, 1200);
 
     return () => {
-      clearTimeout(timer1);
-      clearTimeout(timer2);
-      clearTimeout(timer3);
+      clearTimeout(scrollTimer);
     };
   }, [isAdminPath, config.autoScroll]);
 
-  // Global user gesture listener: touching or scrolling ANYWHERE immediately turns on sound
+  // Global user gesture listener: touching, clicking or scrolling anywhere un-mutes audio
   useEffect(() => {
     if (isAdminPath) return;
 
@@ -673,8 +751,8 @@ export default function App() {
   // ==========================================
   // VIEW 3: PUBLIC LIVE WEBSITE (Clean White)
   // ==========================================
-  // Include playsinline=1 & muted=0 & autoplay=1 for mobile Chrome/Safari compatibility
-  const embedUrl = `https://player.vimeo.com/video/${config.videoId}?autoplay=1&muted=0&loop=1&autopause=0&playsinline=1&badge=0&player_id=0&app_id=58479`;
+  // Embed URL with api=1 and player_id for official Vimeo Player SDK control
+  const embedUrl = `https://player.vimeo.com/video/${config.videoId}?autoplay=1&muted=0&loop=1&autopause=0&playsinline=1&api=1&badge=0&player_id=vimeo-player-main`;
 
   return (
     <div
@@ -729,6 +807,7 @@ export default function App() {
         <div className="relative w-full aspect-video rounded-2xl overflow-hidden shadow-2xl border border-slate-200 bg-black">
           <iframe
             ref={iframeRef}
+            id="vimeo-player-main"
             src={embedUrl}
             className="w-full h-full border-0"
             allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media"
@@ -743,10 +822,10 @@ export default function App() {
                 e.stopPropagation();
                 triggerAutoSound();
               }}
-              className="absolute inset-x-0 bottom-4 mx-auto w-fit z-20 px-4 py-2 bg-slate-900/95 hover:bg-black text-white rounded-full shadow-2xl border border-slate-700/80 text-xs font-semibold flex items-center gap-2 backdrop-blur-md transition-all cursor-pointer animate-pulse"
+              className="absolute inset-x-0 bottom-4 mx-auto w-fit z-20 px-5 py-2.5 bg-slate-900/95 hover:bg-black text-white rounded-full shadow-2xl border border-slate-700/80 text-xs font-semibold flex items-center gap-2 backdrop-blur-md transition-all cursor-pointer animate-pulse"
             >
               <Volume2 className="w-4 h-4 text-emerald-400" />
-              <span>সাউন্ড চালু করতে স্ক্রিনে যেকোনো জায়গায় স্পর্শ করুন</span>
+              <span>সাউন্ড শুনতে এখানে স্পর্শ করুন (সাউন্ড ফুল ১০০%)</span>
             </div>
           )}
         </div>
