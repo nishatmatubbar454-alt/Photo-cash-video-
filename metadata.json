@@ -1,0 +1,6 @@
+{
+  "name": "White Cinema - Vimeo Video Player",
+  "description": "একটি আধুনিক ও শুভ্র মিনিমালিস্ট ডিজাইনের ভিডিও প্লেয়ার ওয়েবসাইট, যেখানে Vimeo ভিডিও সরাসরি সহজে দেখা যায়।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
